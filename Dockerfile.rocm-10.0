@@ -1,0 +1,115 @@
+# llama.cpp EngramHalo (strix-halo-qwen4exp) for AMD Strix Halo (gfx1151) on ROCm 10.0 (TheRock).
+# Port of Dockerfile.rocm-7.14 onto the kyuz0 ROCm 10.0 base layout.
+#   podman build -f Dockerfile.rocm-10.0 -t engramhalo-rocm10 .
+#   distrobox create --name llama-engram10 --image localhost/engramhalo-rocm10:latest -- \
+#     --device /dev/dri --device /dev/kfd --group-add video --group-add render --security-opt seccomp=unconfined
+
+# build stage
+FROM registry.fedoraproject.org/fedora:44 AS builder
+
+# ROCm 10.0 Core SDK repository (TheRock release stream)
+RUN <<'EOF'
+tee /etc/yum.repos.d/rocm.repo <<REPO
+[amdrocm-stable]
+name=ROCm 10.0.0
+baseurl=https://stable.repo.amd.com/rocm/core/packages/rhel10/x86_64
+enabled=1
+priority=50
+gpgcheck=1
+gpgkey=https://stable.repo.amd.com/rocm/gpg/packages.gpg
+REPO
+EOF
+
+RUN dnf -y --nodocs --setopt=install_weak_deps=False \
+  install \
+  make gcc gcc-c++ cmake libcurl-devel ninja-build rdma-core-devel \
+  amdrocm-core-devel10.0-gfx1151 \
+  git-core sudo rsync patch \
+  && dnf clean all && rm -rf /var/cache/dnf/*
+
+ENV ROCM_PATH=/opt/rocm \
+  HIP_PATH=/opt/rocm \
+  PATH=/opt/rocm/bin:/opt/rocm/core/bin:/opt/rocm/core/lib/llvm/bin:$PATH \
+  LD_LIBRARY_PATH=/opt/rocm/core/lib/rocm_sysdeps/lib:/opt/rocm/core/lib
+
+WORKDIR /opt/llama.cpp
+ARG REPO=https://github.com/Aristo94/EngramHalo.cpp.git
+ARG BRANCH=strix-halo-qwen4exp
+RUN git clone -b ${BRANCH} --single-branch --recursive ${REPO} .
+
+# iGPU host-buffer workaround for ggml-org/llama.cpp#25992 (same as rocm-7.14 build).
+COPY llama-cpp-25992-rocm-host-buffer.patch /tmp/
+# Loader patch used in the measured builds; applied when it still fits the tree, skipped as obsolete otherwise.
+COPY llama-cpp-qwen38-per-buffer-mmap.patch /tmp/
+RUN if git apply --check /tmp/llama-cpp-25992-rocm-host-buffer.patch; then \
+      git apply /tmp/llama-cpp-25992-rocm-host-buffer.patch; \
+    elif git apply --reverse --check /tmp/llama-cpp-25992-rocm-host-buffer.patch; then \
+      echo "#25992 workaround already present upstream"; \
+    else \
+      echo "WARNING: #25992 workaround no longer applies; multi-slot serving may return wrong responses"; \
+    fi \
+  && if git apply --check /tmp/llama-cpp-qwen38-per-buffer-mmap.patch; then \
+      git apply /tmp/llama-cpp-qwen38-per-buffer-mmap.patch; \
+    else \
+      echo "per-buffer mmap loader patch skipped as obsolete"; \
+    fi \
+  && cmake -S . -B build \
+  -DGGML_HIP=ON \
+  -DAMDGPU_TARGETS=gfx1151 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_RPC=ON \
+  -DROCM_PATH=/opt/rocm \
+  -DHIP_PLATFORM=amd \
+  && cmake --build build --config Release -- -j$(nproc) \
+  && cmake --install build --config Release
+
+RUN mkdir -p /usr/local/lib64 \
+  && find /opt/llama.cpp/build -type f -name 'lib*.so*' -exec cp {} /usr/local/lib64/ \; \
+  && ldconfig
+
+# runtime stage
+FROM registry.fedoraproject.org/fedora-minimal:44
+
+RUN <<'EOF'
+tee /etc/yum.repos.d/rocm.repo <<REPO
+[amdrocm-stable]
+name=ROCm 10.0.0
+baseurl=https://stable.repo.amd.com/rocm/core/packages/rhel10/x86_64
+enabled=1
+priority=50
+gpgcheck=1
+gpgkey=https://stable.repo.amd.com/rocm/gpg/packages.gpg
+REPO
+EOF
+
+RUN microdnf -y --nodocs --setopt=install_weak_deps=0 \
+  install \
+  bash ca-certificates libatomic libstdc++ libgcc libgomp libibverbs sudo \
+  amdrocm10.0-gfx1151 \
+  radeontop procps-ng \
+  && microdnf clean all && rm -rf /var/cache/dnf/* \
+  && ln -s core-10.0 /opt/rocm/core \
+  && ln -s core-10.0/bin /opt/rocm/bin \
+  && ln -s core-10.0/include /opt/rocm/include \
+  && ln -s core-10.0/lib /opt/rocm/lib \
+  && ln -s core-10.0/libexec /opt/rocm/libexec \
+  && ln -s core-10.0/lib/llvm /opt/rocm/llvm \
+  && ln -s core-10.0/share /opt/rocm/share \
+  && ln -s core-10.0/lib/llvm/amdgcn /opt/rocm/amdgcn
+
+ENV ROCM_PATH=/opt/rocm \
+  HIP_PATH=/opt/rocm \
+  PATH=/opt/rocm/bin:/opt/rocm/core/bin:/opt/rocm/core/lib/llvm/bin:$PATH \
+  LD_LIBRARY_PATH=/opt/rocm/core/lib/rocm_sysdeps/lib:/opt/rocm/core/lib
+
+COPY --from=builder /usr/local/ /usr/local/
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf \
+  && echo "/usr/local/lib64" >> /etc/ld.so.conf.d/local.conf \
+  && echo "/opt/rocm/core/lib" > /etc/ld.so.conf.d/rocm.conf \
+  && echo "/opt/rocm/core/lib/rocm_sysdeps/lib" >> /etc/ld.so.conf.d/rocm.conf \
+  && ldconfig \
+  && find /usr/local/lib /usr/local/lib64 -maxdepth 1 -type f -name 'libllama*.so*' \
+     -exec cp -n {} /usr/lib64/ \; \
+  && ldconfig
+
+CMD ["/bin/bash"]
