@@ -13,7 +13,13 @@ built from the [EngramHalo.cpp](https://github.com/Aristo94/EngramHalo.cpp)
 
 The image contains **no model weights** — bring your own GGUF.
 
-## Build
+## Pull (recommended)
+
+```bash
+podman pull docker.io/marty314/engramhalo:rocm10
+```
+
+## Build from source
 
 ```bash
 podman build -f Dockerfile.rocm-10.0 -t localhost/engramhalo-rocm10:latest .
@@ -22,7 +28,7 @@ podman build -f Dockerfile.rocm-10.0 -t localhost/engramhalo-rocm10:latest .
 ## Run (distrobox)
 
 ```bash
-distrobox create --name llama-engram10 --image localhost/engramhalo-rocm10:latest -- \
+distrobox create --name llama-engram10 --image docker.io/marty314/engramhalo:rocm10 -- \
   --device /dev/dri --device /dev/kfd --group-add video --group-add render \
   --security-opt seccomp=unconfined
 
