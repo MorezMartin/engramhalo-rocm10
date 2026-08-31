@@ -1,0 +1,48 @@
+# Qwen3.8-Flash-Next ROCmFP4-FAST image — LaurentZuijdwijk/llama.cpp fork
+# (branch vulkan/qwen4exp-rocmfpx), Vulkan backend.
+# The ROCmFP4 quant types need THIS fork; on this branch the FP4 fast paths are
+# wired into Vulkan (HIP kernels exist but are not wired). Build follows the
+# fork's .devops/vulkan.Dockerfile, pinned to the fork branch.
+#
+#   podman build -f Dockerfile.vulkan-rocmfp4 -t localhost/engramhalo-rocmfp4:latest .
+#   distrobox create --name llama-fp4 --image localhost/engramhalo-rocmfp4:latest -- \
+#     --device /dev/dri --security-opt seccomp=unconfined
+#
+# Model: https://huggingface.co/agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF
+# MTP sidecar: https://huggingface.co/agentionai/Qwen3.8-Flash-Next-MTP-ROCmFP4-FAST-GGUF
+
+FROM docker.io/ubuntu:26.04 AS build
+
+RUN apt update && apt install -y --no-install-recommends \
+  git build-essential cmake cmake-data wget xz-utils ca-certificates \
+  libssl-dev curl \
+  libvulkan-dev glslc spirv-headers \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ARG REPO=https://github.com/LaurentZuijdwijk/llama.cpp.git
+ARG BRANCH=vulkan/qwen4exp-rocmfpx
+RUN git clone --single-branch --recursive --depth 1 -b ${BRANCH} ${REPO} . \
+  && cmake -B build \
+     -DGGML_NATIVE=OFF \
+     -DGGML_VULKAN=ON \
+     -DLLAMA_BUILD_TESTS=OFF \
+     -DCMAKE_BUILD_TYPE=Release \
+  && cmake --build build --config Release -j$(nproc) \
+  && cmake --install build --config Release
+
+FROM docker.io/ubuntu:26.04 AS runtime
+
+RUN apt update && apt install -y --no-install-recommends \
+  ca-certificates libssl3 curl libstdc++6 libatomic1 libgomp1 \
+  libvulkan1 mesa-vulkan-drivers \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /usr/local/ /usr/local/
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf \
+  && echo "/usr/local/lib/x86_64-linux-gnu" >> /etc/ld.so.conf.d/local.conf \
+  && ldconfig
+
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+
+CMD ["/bin/bash"]
