@@ -2,7 +2,8 @@
 # (branch vulkan/qwen4exp-rocmfpx), Vulkan backend.
 # The ROCmFP4 quant types need THIS fork; on this branch the FP4 fast paths are
 # wired into Vulkan (HIP kernels exist but are not wired). Build follows the
-# fork's .devops/vulkan.Dockerfile, pinned to the fork branch.
+# fork's .devops/vulkan.Dockerfile, on a Fedora base (same as the rocm10 image;
+# docker.io base layers trigger a Docker Hub cross-repo blob-mount bug).
 #
 #   podman build -f Dockerfile.vulkan-rocmfp4 -t localhost/engramhalo-rocmfp4:latest .
 #   distrobox create --name llama-fp4 --image localhost/engramhalo-rocmfp4:latest -- \
@@ -11,13 +12,14 @@
 # Model: https://huggingface.co/agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF
 # MTP sidecar: https://huggingface.co/agentionai/Qwen3.8-Flash-Next-MTP-ROCmFP4-FAST-GGUF
 
-FROM docker.io/ubuntu:26.04 AS build
+FROM registry.fedoraproject.org/fedora:44 AS builder
 
-RUN apt update && apt install -y --no-install-recommends \
-  git build-essential cmake cmake-data wget xz-utils ca-certificates \
-  libssl-dev curl \
-  libvulkan-dev glslc spirv-headers \
-  && rm -rf /var/lib/apt/lists/*
+RUN dnf -y --nodocs --setopt=install_weak_deps=False \
+  install \
+  make gcc gcc-c++ cmake libcurl-devel ninja-build \
+  git-core sudo rsync patch \
+  vulkan-headers vulkan-loader-devel glslc spirv-headers-devel \
+  && dnf clean all && rm -rf /var/cache/dnf/*
 
 WORKDIR /app
 ARG REPO=https://github.com/LaurentZuijdwijk/llama.cpp.git
@@ -31,18 +33,17 @@ RUN git clone --single-branch --recursive --depth 1 -b ${BRANCH} ${REPO} . \
   && cmake --build build --config Release -j$(nproc) \
   && cmake --install build --config Release
 
-FROM docker.io/ubuntu:26.04 AS runtime
+FROM registry.fedoraproject.org/fedora-minimal:44
 
-RUN apt update && apt install -y --no-install-recommends \
-  ca-certificates libssl3 curl libstdc++6 libatomic1 libgomp1 \
-  libvulkan1 mesa-vulkan-drivers \
-  && rm -rf /var/lib/apt/lists/*
+RUN microdnf -y --nodocs --setopt=install_weak_deps=0 \
+  install \
+  bash ca-certificates libcurl libatomic libstdc++ libgcc libgomp sudo \
+  vulkan-loader mesa-vulkan-drivers \
+  && microdnf clean all && rm -rf /var/cache/dnf/*
 
-COPY --from=build /usr/local/ /usr/local/
+COPY --from=builder /usr/local/ /usr/local/
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf \
-  && echo "/usr/local/lib/x86_64-linux-gnu" >> /etc/ld.so.conf.d/local.conf \
+  && echo "/usr/local/lib64" >> /etc/ld.so.conf.d/local.conf \
   && ldconfig
-
-ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json
 
 CMD ["/bin/bash"]
